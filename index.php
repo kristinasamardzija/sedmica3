@@ -44,6 +44,7 @@ foreach ($racuni as $racun) {
         $sumaRacuna += $stavka["cijena"];
     }
 
+    
     $ukupnaDnevnaSuma += $sumaRacuna;
 
     $obradjeniRacuni[] = [
