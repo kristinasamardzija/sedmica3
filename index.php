@@ -1,9 +1,7 @@
 <?php
 
-
 $nazivButika = "Karolina Boutique";
 $datumIzvjestaja = date("d.m.Y.");
-
 
 $racuni = [
     [
@@ -44,7 +42,6 @@ foreach ($racuni as $racun) {
         $sumaRacuna += $stavka["cijena"];
     }
 
-    
     $ukupnaDnevnaSuma += $sumaRacuna;
 
     $obradjeniRacuni[] = [
