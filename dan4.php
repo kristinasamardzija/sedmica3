@@ -1,163 +1,225 @@
 <?php
-// ============================================
-// DAN 4 - Povezivanje PHP-a i MySQL-a
-// PROJEKAT: Karolina Boutique
-// Sada citamo podatke direktno iz baze (Dan 3)
-// umjesto iz $_SESSION (Dan 2) ili hardkodiranog niza (Dan 1)
-// ============================================
+session_start();
 
 $nazivButika = "Karolina Boutique";
 
-// --------------------------------------------
-// 1) KONEKCIJA NA BAZU
-// --------------------------------------------
-// Parametri: (host, korisnik, lozinka, ime_baze)
-// Podrazumijevano za XAMPP: host="localhost", user="root", lozinka=""
-$host = "localhost";
-$korisnik = "root";
-$lozinka = "";
-$imeBaze = "karolina_boutique";
-
-$konekcija = new mysqli($host, $korisnik, $lozinka, $imeBaze);
-
-// Ako konekcija ne uspije, prekidamo izvrsavanje i ispisujemo gresku
+$konekcija = new mysqli("localhost", "root", "", "karolina_boutique");
 if ($konekcija->connect_error) {
-    die("⛔ Konekcija na bazu nije uspjela: " . $konekcija->connect_error);
+    die("Konekcija na bazu nije uspjela: " . $konekcija->connect_error);
 }
-
-// Postavljamo enkodiranje da se ne bi lomila slova (č, š, ž...)
 $konekcija->set_charset("utf8mb4");
 
+if ($_SERVER["REQUEST_METHOD"] === "POST") {
 
-// --------------------------------------------
-// 2) DOHVATANJE RACUNA IZ BAZE (SELECT)
-// --------------------------------------------
-$racuni = [];
+    if (isset($_POST["novi_racun"])) {
+        $provjera = $konekcija->query("SELECT id FROM racuni WHERE status = 'otvoren' LIMIT 1");
 
-$upitRacuni = "SELECT * FROM racuni ORDER BY broj_racuna ASC";
-$rezultatRacuni = $konekcija->query($upitRacuni);
+        if ($provjera->num_rows > 0) {
+            $_SESSION["poruka"] = "Već postoji otvoren račun.";
+        } else {
+            $rezultat = $konekcija->query("SELECT COALESCE(MAX(broj_racuna), 0) + 1 AS sledeci FROM racuni");
+            $sledeciBroj = $rezultat->fetch_assoc()["sledeci"];
 
-// query() vraca rezultat kao "tabelu" - fetch_assoc() vadi jedan red kao niz
-// petlja se ponavlja dok ima redova (kad ih nestane, fetch_assoc vraca null)
-while ($red = $rezultatRacuni->fetch_assoc()) {
-    $racuni[] = $red;
-}
+            $upit = $konekcija->prepare("INSERT INTO racuni (broj_racuna, datum, vrijeme, suma, status) VALUES (?, CURDATE(), CURTIME(), 0, 'otvoren')");
+            $upit->bind_param("i", $sledeciBroj);
+            $upit->execute();
+            $upit->close();
 
-
-// --------------------------------------------
-// 3) ZA SVAKI RACUN, DOHVATI NJEGOVE STAVKE
-// --------------------------------------------
-foreach ($racuni as $indeks => $racun) {
-    $racunId = (int)$racun["id"]; // (int) - osiguravamo da je broj, radi sigurnosti
-
-    $upitStavke = "SELECT * FROM stavke WHERE racun_id = $racunId";
-    $rezultatStavke = $konekcija->query($upitStavke);
-
-    $stavke = [];
-    while ($stavka = $rezultatStavke->fetch_assoc()) {
-        $stavke[] = $stavka;
+            $_SESSION["poruka"] = "Otvoren novi Račun br. $sledeciBroj.";
+        }
     }
 
-    // Dodajemo stavke unutar postojeceg racuna (kao sto smo radili Dan 1)
-    $racuni[$indeks]["stavke"] = $stavke;
+    if (isset($_POST["dodaj_stavku"])) {
+        $naziv = isset($_POST["naziv"]) ? trim($_POST["naziv"]) : "";
+        $cijena = isset($_POST["cijena"]) ? trim($_POST["cijena"]) : "";
+
+        if ($naziv === "" || $cijena === "") {
+            $_SESSION["poruka"] = "Moraš unijeti naziv i cijenu.";
+        } elseif (!is_numeric($cijena) || (float)$cijena <= 0) {
+            $_SESSION["poruka"] = "Cijena mora biti broj veći od 0.";
+        } else {
+            $rezultat = $konekcija->query("SELECT id FROM racuni WHERE status = 'otvoren' ORDER BY id DESC LIMIT 1");
+
+            if ($rezultat->num_rows === 0) {
+                $_SESSION["poruka"] = "Nema otvorenog računa.";
+            } else {
+                $racunId = $rezultat->fetch_assoc()["id"];
+
+                $upit = $konekcija->prepare("INSERT INTO stavke (racun_id, naziv, cijena) VALUES (?, ?, ?)");
+                $upit->bind_param("isd", $racunId, $naziv, $cijena);
+                $upit->execute();
+                $upit->close();
+
+                $_SESSION["poruka"] = "Stavka \"" . htmlspecialchars($naziv) . "\" dodana.";
+            }
+        }
+    }
+
+    if (isset($_POST["zatvori_racun"])) {
+        $rezultat = $konekcija->query("SELECT id FROM racuni WHERE status = 'otvoren' ORDER BY id DESC LIMIT 1");
+
+        if ($rezultat->num_rows === 0) {
+            $_SESSION["poruka"] = "Nema otvorenog računa za zatvaranje.";
+        } else {
+            $racunId = $rezultat->fetch_assoc()["id"];
+            $brojStavki = $konekcija->query("SELECT COUNT(*) AS broj FROM stavke WHERE racun_id = $racunId")->fetch_assoc()["broj"];
+
+            if ($brojStavki == 0) {
+                $_SESSION["poruka"] = "Ne možeš zatvoriti prazan račun.";
+            } else {
+                $upit = $konekcija->prepare("UPDATE racuni SET status = 'zatvoren' WHERE id = ?");
+                $upit->bind_param("i", $racunId);
+                $upit->execute();
+                $upit->close();
+
+                $_SESSION["poruka"] = "Račun zatvoren.";
+            }
+        }
+    }
+
+    header("Location: " . $_SERVER["PHP_SELF"]);
+    exit;
 }
 
+$poruka = "";
+if (isset($_SESSION["poruka"])) {
+    $poruka = $_SESSION["poruka"];
+    unset($_SESSION["poruka"]);
+}
 
-// --------------------------------------------
-// 4) UKUPNA DNEVNA SUMA - direktno preko SQL-a
-// --------------------------------------------
-// Umjesto da sabiramo u PHP-u, mozemo tražiti da baza sama sabere (SUM)
-$upitSuma = "SELECT SUM(suma) AS ukupno FROM racuni";
-$rezultatSuma = $konekcija->query($upitSuma);
-$redSuma = $rezultatSuma->fetch_assoc();
-$ukupnaDnevnaSuma = $redSuma["ukupno"] !== null ? $redSuma["ukupno"] : 0;
+$trenutniRacun = null;
+$rezultat = $konekcija->query("SELECT * FROM racuni WHERE status = 'otvoren' ORDER BY id DESC LIMIT 1");
+if ($rezultat->num_rows > 0) {
+    $trenutniRacun = $rezultat->fetch_assoc();
 
+    $stavkeUpit = $konekcija->prepare("SELECT * FROM stavke WHERE racun_id = ?");
+    $stavkeUpit->bind_param("i", $trenutniRacun["id"]);
+    $stavkeUpit->execute();
+    $trenutniRacun["stavke"] = $stavkeUpit->get_result()->fetch_all(MYSQLI_ASSOC);
+    $stavkeUpit->close();
 
-// Zatvaramo konekciju kad vise nije potrebna (dobra praksa)
+    $trenutniRacun["suma"] = array_sum(array_column($trenutniRacun["stavke"], "cijena"));
+}
+
+$zatvoreniRacuni = [];
+$rezultat = $konekcija->query("SELECT * FROM racuni WHERE status = 'zatvoren' ORDER BY broj_racuna ASC");
+while ($racun = $rezultat->fetch_assoc()) {
+    $stavkeUpit = $konekcija->prepare("SELECT * FROM stavke WHERE racun_id = ?");
+    $stavkeUpit->bind_param("i", $racun["id"]);
+    $stavkeUpit->execute();
+    $racun["stavke"] = $stavkeUpit->get_result()->fetch_all(MYSQLI_ASSOC);
+    $stavkeUpit->close();
+
+    $racun["suma"] = array_sum(array_column($racun["stavke"], "cijena"));
+    $zatvoreniRacuni[] = $racun;
+}
+
+$ukupnaDnevnaSuma = 0;
+foreach ($zatvoreniRacuni as $racun) {
+    $ukupnaDnevnaSuma += $racun["suma"];
+}
+
 $konekcija->close();
 ?>
 <!DOCTYPE html>
 <html lang="ba">
 <head>
     <meta charset="UTF-8">
-    <title><?php echo $nazivButika; ?> - Podaci iz baze</title>
+    <title><?php echo $nazivButika; ?></title>
     <style>
-        body { font-family: Arial, sans-serif; max-width: 700px; margin: 40px auto; padding: 0 20px; background: #f5f5f5; }
+        body { font-family: Arial, sans-serif; max-width: 650px; margin: 40px auto; padding: 0 20px; background: #f5f5f5; }
         h1 { color: #2c3e50; margin-bottom: 0; }
+        h2 { color: #34495e; margin-top: 35px; }
         .podnaslov { color: #7f8c8d; margin-top: 4px; }
-        .racun { background: white; padding: 18px 22px; border-radius: 8px; box-shadow: 0 2px 6px rgba(0,0,0,0.1); margin-bottom: 15px; }
+        .card { background: white; padding: 20px 25px; border-radius: 8px; box-shadow: 0 2px 6px rgba(0,0,0,0.1); margin-bottom: 20px; }
+        label { display: block; margin-top: 10px; font-weight: bold; font-size: 14px; }
+        input[type=text], input[type=number] { width: 100%; padding: 8px; margin-top: 4px; border: 1px solid #ccc; border-radius: 4px; box-sizing: border-box; }
+        button { margin-top: 15px; padding: 10px 18px; border: none; border-radius: 4px; cursor: pointer; font-size: 14px; color: white; }
+        .btn-dodaj { background: #2980b9; }
+        .btn-dodaj:hover { background: #206694; }
+        .btn-zatvori { background: #27ae60; margin-left: 8px; }
+        .btn-zatvori:hover { background: #1e8449; }
+        .btn-novi { background: #8e44ad; }
+        .btn-novi:hover { background: #6c3483; }
+        .poruka { margin-top: 15px; padding: 10px; border-radius: 4px; background: #eef; font-size: 14px; }
+        .stavka-red { display: flex; justify-content: space-between; padding: 5px 0; border-bottom: 1px dashed #eee; }
+        .racun { background: #fbfbfb; border: 1px solid #eee; padding: 15px 20px; border-radius: 8px; margin-bottom: 12px; }
         .racun h3 { margin-top: 0; color: #34495e; }
-        .stavka { display: flex; justify-content: space-between; padding: 4px 0; border-bottom: 1px dashed #eee; }
-        .suma-racuna { text-align: right; font-weight: bold; margin-top: 8px; color: #2980b9; }
-        .ukupno { background: #2c3e50; color: white; padding: 20px 25px; border-radius: 8px; font-size: 20px; text-align: center; margin-top: 20px; }
-        .info-box { background: #eafaf1; border: 1px solid #a3e4bc; padding: 10px 15px; border-radius: 6px; font-size: 13px; color: #196f3d; margin-bottom: 20px; }
-
-        table { width: 100%; border-collapse: collapse; margin-top: 15px; background: white; border-radius: 8px; overflow: hidden; }
-        th, td { padding: 10px 12px; text-align: left; border-bottom: 1px solid #eee; }
-        th { background: #2c3e50; color: white; }
-        tr:hover { background: #f9f9f9; }
+        .suma-racuna { text-align: right; font-weight: bold; margin-top: 6px; color: #2980b9; }
+        .ukupno { background: #2c3e50; color: white; padding: 18px 25px; border-radius: 8px; font-size: 19px; text-align: center; margin-top: 10px; }
+        .prazno { color: #999; font-style: italic; }
     </style>
 </head>
 <body>
 
     <h1><?php echo $nazivButika; ?></h1>
-    <p class="podnaslov">Podaci učitani direktno iz MySQL baze</p>
+    <p class="podnaslov">Dnevni izvještaj — unos direktno u bazu</p>
 
-    <div class="info-box">
-        ✅ Uspješno povezano na bazu <strong><?php echo $imeBaze; ?></strong> — pronađeno <strong><?php echo count($racuni); ?></strong> računa.
-    </div>
+    <?php if ($poruka !== ""): ?>
+        <div class="poruka"><?php echo $poruka; ?></div>
+    <?php endif; ?>
 
-    <!-- PRIKAZ 1: KARTICE (isti stil kao Dan 1, ali sad iz baze) -->
-    <h2>Prikaz u karticama</h2>
+    <div class="card">
+        <?php if ($trenutniRacun === null): ?>
+            <h2>Nema otvorenog računa</h2>
+            <form method="POST" action="">
+                <button type="submit" name="novi_racun" class="btn-novi">Novi račun</button>
+            </form>
+        <?php else: ?>
+            <h2>Trenutni račun (br. <?php echo $trenutniRacun["broj_racuna"]; ?>)</h2>
 
-    <?php foreach ($racuni as $racun): ?>
-        <div class="racun">
-            <h3>Račun br. <?php echo htmlspecialchars($racun["broj_racuna"]); ?>
-                <span style="font-weight:normal; color:#999; font-size:14px;">
-                    (<?php echo htmlspecialchars($racun["datum"]); ?> u <?php echo htmlspecialchars($racun["vrijeme"]); ?>)
-                </span>
-            </h3>
-
-            <?php foreach ($racun["stavke"] as $stavka): ?>
-                <div class="stavka">
-                    <span><?php echo htmlspecialchars($stavka["naziv"]); ?></span>
-                    <span><?php echo number_format($stavka["cijena"], 2); ?> KM</span>
-                </div>
-            <?php endforeach; ?>
-
-            <div class="suma-racuna">Suma računa: <?php echo number_format($racun["suma"], 2); ?> KM</div>
-        </div>
-    <?php endforeach; ?>
-
-    <div class="ukupno">
-        Ukupna dnevna suma: <strong><?php echo number_format($ukupnaDnevnaSuma, 2); ?> KM</strong>
-    </div>
-
-    <!-- PRIKAZ 2: OBICNA HTML TABELA (druga opcija iz zadatka) -->
-    <h2>Prikaz u tabeli (svaka stavka posebno)</h2>
-
-    <table>
-        <thead>
-            <tr>
-                <th>Račun br.</th>
-                <th>Stavka</th>
-                <th>Cijena</th>
-                <th>Vrijeme</th>
-            </tr>
-        </thead>
-        <tbody>
-            <?php foreach ($racuni as $racun): ?>
-                <?php foreach ($racun["stavke"] as $stavka): ?>
-                    <tr>
-                        <td><?php echo htmlspecialchars($racun["broj_racuna"]); ?></td>
-                        <td><?php echo htmlspecialchars($stavka["naziv"]); ?></td>
-                        <td><?php echo number_format($stavka["cijena"], 2); ?> KM</td>
-                        <td><?php echo htmlspecialchars($racun["vrijeme"]); ?></td>
-                    </tr>
+            <?php if (count($trenutniRacun["stavke"]) === 0): ?>
+                <p class="prazno">Nema još stavki na ovom računu.</p>
+            <?php else: ?>
+                <?php foreach ($trenutniRacun["stavke"] as $stavka): ?>
+                    <div class="stavka-red">
+                        <span><?php echo htmlspecialchars($stavka["naziv"]); ?></span>
+                        <span><?php echo number_format($stavka["cijena"], 2); ?> KM</span>
+                    </div>
                 <?php endforeach; ?>
-            <?php endforeach; ?>
-        </tbody>
-    </table>
+                <div class="suma-racuna">Suma: <?php echo number_format($trenutniRacun["suma"], 2); ?> KM</div>
+            <?php endif; ?>
+
+            <form method="POST" action="">
+                <label for="naziv">Naziv stavke:</label>
+                <input type="text" id="naziv" name="naziv" placeholder="npr. Haljina">
+
+                <label for="cijena">Cijena (KM):</label>
+                <input type="number" step="0.01" id="cijena" name="cijena" placeholder="npr. 45.00">
+
+                <button type="submit" name="dodaj_stavku" class="btn-dodaj">Dodaj stavku</button>
+                <button type="submit" name="zatvori_racun" class="btn-zatvori">Zatvori račun</button>
+            </form>
+        <?php endif; ?>
+    </div>
+
+    <h2>Zatvoreni računi</h2>
+
+    <?php if (count($zatvoreniRacuni) === 0): ?>
+        <p class="prazno">Još nema zatvorenih računa.</p>
+    <?php else: ?>
+        <?php foreach ($zatvoreniRacuni as $racun): ?>
+            <div class="racun">
+                <h3>Račun br. <?php echo $racun["broj_racuna"]; ?>
+                    <span style="font-weight:normal; color:#999; font-size:13px;">
+                        (<?php echo htmlspecialchars($racun["datum"]); ?> u <?php echo htmlspecialchars($racun["vrijeme"]); ?>)
+                    </span>
+                </h3>
+                <?php foreach ($racun["stavke"] as $stavka): ?>
+                    <div class="stavka-red">
+                        <span><?php echo htmlspecialchars($stavka["naziv"]); ?></span>
+                        <span><?php echo number_format($stavka["cijena"], 2); ?> KM</span>
+                    </div>
+                <?php endforeach; ?>
+                <div class="suma-racuna">Suma računa: <?php echo number_format($racun["suma"], 2); ?> KM</div>
+            </div>
+        <?php endforeach; ?>
+
+        <div class="ukupno">
+            Ukupna dnevna suma (<?php echo count($zatvoreniRacuni); ?> računa):
+            <strong><?php echo number_format($ukupnaDnevnaSuma, 2); ?> KM</strong>
+        </div>
+    <?php endif; ?>
 
 </body>
 </html>
